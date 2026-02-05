@@ -39,6 +39,6 @@ jobs:
           
         run: python main.py
 
-      # This section prevents GitHub from disabling the bot after 60 days
-      - name: Keepalive Workflow
-        uses: gautamkrishnar/keepalive-workflow@v2
+      # # This section prevents GitHub from disabling the bot after 60 days
+      # - name: Keepalive Workflow
+      #   uses: gautamkrishnar/keepalive-workflow@v2
