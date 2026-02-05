@@ -1,5 +1,9 @@
 name: Test Access
-on: [push]
+on:
+  schedule:
+    - cron: '17 * * * *' # Runs at minute 15 of every hour
+  workflow_dispatch: # Allows manual button click
+
 jobs:
   test:
     runs-on: ubuntu-latest
