@@ -1,0 +1,4 @@
+telethon
+gspread
+python-dotenv
+google-generativeai
