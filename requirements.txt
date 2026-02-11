@@ -2,3 +2,4 @@ telethon
 gspread
 python-dotenv
 google-generativeai
+google-genai
