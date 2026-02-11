@@ -7,11 +7,33 @@ from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 import gspread
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from itertools import cycle
+from pydantic import BaseModel, Field
+from typing import Optional, List
 
 # Load environment variables
 load_dotenv()
+
+
+# ============================================================================
+# Pydantic Models for Structured Job Data
+# ============================================================================
+
+class JobPosting(BaseModel):
+    """Represents a single job posting"""
+    company_name: Optional[str] = Field(None, description="Company name")
+    role: Optional[str] = Field(None, description="Job role/title")
+    compensation: Optional[str] = Field(None, description="Salary/CTC information")
+    years_of_experience: Optional[str] = Field(None, description="Years of experience required")
+    passout_year: Optional[str] = Field(None, description="Target graduation year(s)")
+    application_link: Optional[str] = Field(None, description="Application URL")
+
+
+class JobPostingList(BaseModel):
+    """Contains multiple job postings from a single message"""
+    jobs: List[JobPosting] = Field(default_factory=list, description="List of job postings found in the message")
 
 
 class APIKeyRotator:
@@ -47,11 +69,9 @@ class APIKeyRotator:
         print(f"  🔄 Rotated to API key #{self.current_key_index + 1}")
         return self.current_key
     
-    def get_model(self):
-        """Get a Gemini model instance with the current API key"""
-        genai.configure(api_key=self.current_key)
-        model_name = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash-exp')
-        return genai.GenerativeModel(model_name)
+    def get_client(self):
+        """Get a Gemini client instance with the current API key"""
+        return genai.Client(api_key=self.current_key)
     
     def record_request(self):
         """Record that a request was made with the current key"""
@@ -89,9 +109,9 @@ SHEET_HEADERS = [
 ]
 
 
-def parse_job_with_gemini(message_text, message_date, max_retries=3):
+def parse_jobs_with_gemini(message_text, message_date, max_retries=3):
     """
-    Use Gemini AI to extract structured job information from a message.
+    Use Gemini AI to extract multiple structured job postings from a message.
     Automatically rotates API keys when rate limits are hit.
     
     Args:
@@ -100,62 +120,65 @@ def parse_job_with_gemini(message_text, message_date, max_retries=3):
         max_retries: Maximum number of retries with key rotation (default: 3)
         
     Returns:
-        dict: Extracted job information or None if parsing failed
+        List[dict]: List of extracted job information or empty list if parsing failed
     """
     if not message_text or len(message_text.strip()) < 10:
-        return None
+        return []
     
-    prompt = f"""You are a job posting parser. Extract the following information from the job posting below.
-Return ONLY a valid JSON object with these exact fields (use null for missing information):
+    prompt = f"""Analyze the following message and extract ALL job postings found within it.
 
-{{
-    "company_name": "Company name",
-    "role": "Job role/title",
-    "compensation": "Salary/CTC information (e.g., '10-15 LPA')",
-    "years_of_experience": "Years of experience required (e.g., '0-2', '3+', 'Freshers')",
-    "passout_year": "Target graduation year(s) (e.g., '2024', '2023-2025', 'All')",
-    "application_link": "Application URL if present"
-}}
+IMPORTANT: Many messages contain MULTIPLE job opportunities. Extract each one separately.
+
+For each job posting, extract:
+- company_name: Company name
+- role: Job role/title
+- compensation: Salary/CTC information (e.g., '10-15 LPA')
+- years_of_experience: Years required (e.g., '0-2', '3+', 'Freshers', 'All')
+- passout_year: Target graduation year(s) (e.g., '2024', '2023-2025', 'All college students')
+- application_link: Application URL if present
 
 Rules:
-- Extract data as accurately as possible
-- For years_of_experience: look for phrases like "0-2 years", "Freshers", "1+ years", "Experience: 2 years"
-- For passout_year: look for phrases like "2024 graduates", "2023, 2024, 2025 grads", "All batches"
+- Extract ALL jobs from the message, even if there are 5, 10, or more
+- For years_of_experience: look for "0-2 years", "Freshers", "1+ years". If not specified, use "All"
+- For passout_year: look for "2024 graduates", "2023-2025", "All batches", "All college students"
 - For compensation: include currency and format (e.g., "10-15 LPA", "₹8-12 LPA")
-- For application_link: extract the actual application URL, not promotional links
-- If multiple URLs exist, pick the one that looks like a job application link
-- Set field to null if information is not found
+- For application_link: extract actual application URLs, not promotional links
+- Use null for any field that's not found
 
-Job Posting:
-{message_text[:500]}
-
-JSON Output:"""
+Message to analyze:
+{message_text}"""
 
     for attempt in range(max_retries):
         try:
-            # Get model with current API key
-            gemini_model = api_rotator.get_model()
+            # Get client with current API key
+            client = api_rotator.get_client()
             api_rotator.record_request()
             
-            response = gemini_model.generate_content(prompt)
-            result_text = response.text.strip()
+            model_name = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash-exp')
             
-            # Clean up markdown code blocks if present
-            if result_text.startswith('```'):
-                result_text = result_text.split('```')[1]
-                if result_text.startswith('json'):
-                    result_text = result_text[4:]
-                result_text = result_text.strip()
+            # Use structured output with Pydantic model
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type='application/json',
+                    response_schema=JobPostingList
+                )
+            )
             
-            # Parse JSON
-            job_data = json.loads(result_text)
+            # Parse the response using Pydantic
+            job_list = JobPostingList.model_validate_json(response.text)
             
-            # Add datetime and original message
-            job_data['datetime'] = message_date.strftime('%Y-%m-%d %H:%M:%S')
-            job_data['original_message'] = message_text
-            job_data['status'] = '📋 InQueue'
+            # Convert to list of dicts and add metadata
+            jobs_data = []
+            for job in job_list.jobs:
+                job_dict = job.model_dump()
+                job_dict['datetime'] = message_date.strftime('%Y-%m-%d %H:%M:%S')
+                job_dict['original_message'] = message_text[:500]  # Truncate long messages
+                job_dict['status'] = '📋 InQueue'
+                jobs_data.append(job_dict)
             
-            return job_data
+            return jobs_data
         
         except Exception as e:
             error_str = str(e).lower()
@@ -169,13 +192,13 @@ JSON Output:"""
                     continue
                 else:
                     print(f"  ❌ All API keys exhausted: {str(e)[:100]}")
-                    return None
+                    return []
             else:
                 # Other errors - don't retry
                 print(f"  ⚠ Gemini parsing error: {str(e)[:100]}")
-                return None
+                return []
     
-    return None
+    return []
 
 
 def get_or_create_sheet(sheet_name):
@@ -317,13 +340,19 @@ async def main():
                 for i, msg in enumerate(messages_in_range, 1):
                     if msg.text:
                         print(f"   🤖 Parsing message {i}/{len(messages_in_range)}...", end=" ")
-                        job_data = parse_job_with_gemini(msg.text, msg.date)
+                        jobs_data = parse_jobs_with_gemini(msg.text, msg.date)
                         
-                        if job_data:
-                            all_jobs.append(job_data)
-                            print(f"✅ {job_data.get('company_name', 'Unknown')} - {job_data.get('role', 'Unknown')}")
+                        if jobs_data:
+                            all_jobs.extend(jobs_data)  # Add all jobs from this message
+                            if len(jobs_data) == 1:
+                                print(f"✅ {jobs_data[0].get('company_name', 'Unknown')} - {jobs_data[0].get('role', 'Unknown')}")
+                            else:
+                                print(f"✅ Found {len(jobs_data)} jobs")
+                                for job in jobs_data:
+                                    print(f"      • {job.get('company_name', 'Unknown')} - {job.get('role', 'Unknown')}")
                         else:
                             print("⏭ Skipped (no job data)")
+
                 
                 print()
                 
