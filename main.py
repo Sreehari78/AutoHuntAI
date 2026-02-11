@@ -154,7 +154,7 @@ Message to analyze:
             client = api_rotator.get_client()
             api_rotator.record_request()
             
-            model_name = os.environ.get('GEMINI_MODEL', 'gemini-2.0-flash-exp')
+            model_name = os.environ.get('GEMINI_MODEL', 'gemini-3-flash-preview')
             
             # Use structured output with Pydantic model
             response = client.models.generate_content(
